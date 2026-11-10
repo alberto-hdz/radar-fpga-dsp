@@ -1,0 +1,4 @@
+*.ghw
+*.o
+*.cf
+syn/out/
