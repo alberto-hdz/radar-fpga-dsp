@@ -101,22 +101,25 @@ def ca_cfar(p, k_q):
     """
     det = np.zeros(N_WIN, dtype=np.int64)
     thr = np.zeros(N_WIN)
+    sums = np.zeros(N_WIN, dtype=np.int64)   # training sums, checked by the testbench
     for i in range(HALF, N_WIN - HALF):
         lag = p[i - HALF:i - N_GUARD].sum()            # 16 cells before the guards
         lead = p[i + N_GUARD + 1:i + HALF + 1].sum()   # 16 cells after the guards
         s = int(lag + lead)
         det[i] = 1 if (int(p[i]) << 16) > k_q * s else 0
         thr[i] = k_q * s / 2**16
-    return det, thr
+        sums[i] = s
+    return det, thr, sums
 
 
-def write_vectors(rI, rQ, hI, hQ, yI, yQ, p, det):
+def write_vectors(rI, rQ, hI, hQ, yI, yQ, p, det, sums):
     VEC.mkdir(exist_ok=True)
     np.savetxt(VEC / "mf_in.txt", np.c_[rI, rQ], fmt="%d")
     np.savetxt(VEC / "mf_coef.txt", np.c_[hI, hQ], fmt="%d")   # h[0]..h[63]
     np.savetxt(VEC / "mf_out_expected.txt", np.c_[yI, yQ], fmt="%d")
     np.savetxt(VEC / "pwr_expected.txt", p, fmt="%d")
     np.savetxt(VEC / "cfar_expected.txt", det, fmt="%d")
+    np.savetxt(VEC / "cfar_sum_expected.txt", sums, fmt="%d")
 
 
 def plot(p, thr, det):
@@ -158,9 +161,9 @@ def main():
 
     k = PFA ** (-1 / (2 * N_TRAIN)) - 1
     k_q = int(round(k * 2**16))
-    det, thr = ca_cfar(p, k_q)
+    det, thr, sums = ca_cfar(p, k_q)
 
-    write_vectors(rI, rQ, hI, hQ, yI, yQ, p, det)
+    write_vectors(rI, rQ, hI, hQ, yI, yQ, p, det, sums)
     plot(p, thr, det)
 
     hits = np.flatnonzero(det)
