@@ -1,8 +1,13 @@
 -- Magnitude squared: pwr = I^2 + Q^2
 --
--- 16-bit signed I/Q in, 32-bit unsigned power out, 2 clocks latency.
---   s1: square I and Q (maps to DSP48 multipliers)
---   s2: add
+-- 16-bit signed I/Q in, 32-bit unsigned power out, 4 clocks latency.
+--   s1: input register   (DSP48 A/B register)
+--   s2: square           (DSP48 M register)
+--   s3: product register (DSP48 P register)
+--   s4: add
+-- Using all three DSP48 pipeline registers lets the multiplier run at full
+-- speed. The first 200 MHz build only had one register around the multiply
+-- and missed timing by 0.693 ns.
 -- Each square is at most (-32768)^2 = 2^30, so the sum is at most 2^31
 -- and always fits in 32 bits unsigned.
 
@@ -30,9 +35,10 @@ entity mag_sq is
 end entity mag_sq;
 
 architecture rtl of mag_sq is
-  signal sq_i, sq_q : signed(2*IN_W-1 downto 0) := (others => '0');
-  signal pwr        : unsigned(OUT_W-1 downto 0) := (others => '0');
-  signal v1, l1, v2, l2 : std_logic := '0';
+  signal xi, xq           : signed(IN_W-1 downto 0) := (others => '0');
+  signal mi, mq, pi, pq   : signed(2*IN_W-1 downto 0) := (others => '0');
+  signal pwr              : unsigned(OUT_W-1 downto 0) := (others => '0');
+  signal v1, l1, v2, l2, v3, l3, v4, l4 : std_logic := '0';
 begin
 
   s_tready <= '1';
@@ -40,26 +46,38 @@ begin
   process (clk)
   begin
     if rising_edge(clk) then
-      -- s1: squares (always >= 0, so the sign bit is always 0)
-      sq_i <= s_i * s_i;
-      sq_q <= s_q * s_q;
-      v1   <= s_tvalid;
-      l1   <= s_tlast and s_tvalid;
+      -- s1: input register
+      xi <= s_i;
+      xq <= s_q;
+      v1 <= s_tvalid;
+      l1 <= s_tlast and s_tvalid;
 
-      -- s2: sum
-      pwr <= resize(unsigned(sq_i), OUT_W) + resize(unsigned(sq_q), OUT_W);
-      v2  <= v1;
-      l2  <= l1;
+      -- s2: squares (always >= 0, so the sign bit is always 0)
+      mi <= xi * xi;
+      mq <= xq * xq;
+      v2 <= v1;
+      l2 <= l1;
+
+      -- s3: product register
+      pi <= mi;
+      pq <= mq;
+      v3 <= v2;
+      l3 <= l2;
+
+      -- s4: sum
+      pwr <= resize(unsigned(pi), OUT_W) + resize(unsigned(pq), OUT_W);
+      v4  <= v3;
+      l4  <= l3;
 
       if rst = '1' then
-        v1 <= '0'; v2 <= '0';
-        l1 <= '0'; l2 <= '0';
+        v1 <= '0'; v2 <= '0'; v3 <= '0'; v4 <= '0';
+        l1 <= '0'; l2 <= '0'; l3 <= '0'; l4 <= '0';
       end if;
     end if;
   end process;
 
-  m_tvalid <= v2;
-  m_tlast  <= l2;
+  m_tvalid <= v4;
+  m_tlast  <= l4;
   m_pwr    <= pwr;
 
 end architecture rtl;

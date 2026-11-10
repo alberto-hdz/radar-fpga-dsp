@@ -22,6 +22,15 @@
 -- When the last sample of a pulse (tlast) reaches the chain, the chain is
 -- cleared so the next pulse starts from zero, like the golden model.
 --
+-- Timing notes (from the first 200 MHz build):
+--   * The chain clear and enable each drive ~3900 flip-flops. The first build
+--     decoded the clear with a LUT in front of every reset pin and missed
+--     timing on routing alone (-0.861 ns, 88% route). Now clr3/ce3 come
+--     straight from registers, and max_fanout makes synthesis replicate them.
+--   * acc_i/acc_q are marked keep so synthesis can't pull them into the
+--     mag_sq DSP as an input register (that left the 31-bit adder driving the
+--     DSP pins directly, -0.693 ns).
+--
 -- No backpressure: s_tready is always '1' because ADC data can't be paused.
 
 library ieee;
@@ -70,6 +79,17 @@ architecture rtl of mf_fir is
   signal acc_i, acc_q : signed(ACC_W-1 downto 0) := (others => '0');
   signal v4, l4       : std_logic := '0';
 
+  -- registered chain control (one copy per ~64 flip-flops after replication)
+  signal ce3, clr3 : std_logic := '0';
+
+  attribute max_fanout : integer;
+  attribute max_fanout of ce3  : signal is 64;
+  attribute max_fanout of clr3 : signal is 64;
+
+  attribute keep : string;
+  attribute keep of acc_i : signal is "true";
+  attribute keep of acc_q : signal is "true";
+
 begin
 
   s_tready <= '1';
@@ -100,23 +120,30 @@ begin
       end loop;
       v3 <= v2;
       l3 <= l2;
+      -- chain control for s4, registered here so each copy drives the
+      -- flip-flop pins directly with no logic in between
+      ce3  <= v2;
+      clr3 <= l2 or rst;   -- end of pulse (or reset): clear the chain
 
-      -- s4: adder chain, only moves on valid samples
+      -- s4: output accumulator
       if v3 = '1' then
         acc_i <= resize(p_i(0), ACC_W) + z_i(1);
         acc_q <= resize(p_q(0), ACC_W) + z_q(1);
-        if l3 = '1' then
-          -- end of pulse: clear the chain so the next pulse starts clean
-          z_i <= (others => (others => '0'));
-          z_q <= (others => (others => '0'));
-        else
-          for k in 1 to N_TAPS-2 loop
-            z_i(k) <= resize(p_i(k), ACC_W) + z_i(k+1);
-            z_q(k) <= resize(p_q(k), ACC_W) + z_q(k+1);
-          end loop;
-          z_i(N_TAPS-1) <= resize(p_i(N_TAPS-1), ACC_W);
-          z_q(N_TAPS-1) <= resize(p_q(N_TAPS-1), ACC_W);
-        end if;
+      end if;
+
+      -- s4: adder chain. clr3 maps to the flip-flop reset pin and ce3 to the
+      -- clock enable. The clear happens on the last sample of a pulse, so the
+      -- next pulse starts from zero.
+      if clr3 = '1' then
+        z_i <= (others => (others => '0'));
+        z_q <= (others => (others => '0'));
+      elsif ce3 = '1' then
+        for k in 1 to N_TAPS-2 loop
+          z_i(k) <= resize(p_i(k), ACC_W) + z_i(k+1);
+          z_q(k) <= resize(p_q(k), ACC_W) + z_q(k+1);
+        end loop;
+        z_i(N_TAPS-1) <= resize(p_i(N_TAPS-1), ACC_W);
+        z_q(N_TAPS-1) <= resize(p_q(N_TAPS-1), ACC_W);
       end if;
       v4 <= v3;
       l4 <= l3;
@@ -124,8 +151,7 @@ begin
       if rst = '1' then
         v1 <= '0'; v2 <= '0'; v3 <= '0'; v4 <= '0';
         l1 <= '0'; l2 <= '0'; l3 <= '0'; l4 <= '0';
-        z_i <= (others => (others => '0'));
-        z_q <= (others => (others => '0'));
+        ce3 <= '0';
       end if;
     end if;
   end process;

@@ -26,10 +26,18 @@
 -- pulse is still filling its window, so the two never collide.
 --
 -- Pipeline after a sample is accepted:
---   a: window shift + running sums (and output bookkeeping)
---   b: total training sum, capture CUT
---   c: threshold multiply K_Q * sum (37 x 16 bits)
---   d: compare -> detection
+--   a : window shift + running sums (and output bookkeeping)
+--   b : total training sum, capture CUT
+--   c1: threshold multiply, split in two 18/19 x 16 halves (DSP48 M register)
+--   c2: product registers (DSP48 P register)
+--   c3: recombine: thr = lo + (hi << 18)
+--   d : compare -> detection
+--
+-- Timing note: the first 200 MHz build did K_Q * sum as one 37 x 16 multiply.
+-- Because K_Q is a constant, synthesis built it from LUTs and carry chains
+-- (17 logic levels, -2.116 ns). Splitting the sum into two halves that each
+-- fit a DSP48 multiplier, forcing them into DSPs and pipelining them fixes
+-- that. The result is still exact: K*sum = K*lo + (K*hi << 18).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -66,6 +74,8 @@ architecture rtl of cfar_ca is
   constant SUM_W : integer := PWR_W + 5;           -- 32 cells -> +5 bits
   constant K_W   : integer := 16;
   constant THR_W : integer := SUM_W + K_W;         -- 53 bits
+  constant LO_W  : integer := 18;                  -- low half of the sum
+  constant HI_W  : integer := SUM_W - LO_W;        -- high half (19 bits)
 
   type sr_t is array (0 to WIN-1) of unsigned(PWR_W-1 downto 0);
   signal sr : sr_t := (others => (others => '0'));
@@ -87,12 +97,33 @@ architecture rtl of cfar_ca is
   signal sum_b      : unsigned(SUM_W-1 downto 0) := (others => '0');
   signal cut_b      : unsigned(PWR_W-1 downto 0) := (others => '0');
 
-  -- stage c
+  -- stage c1: partial products
+  signal vc1, lc1, fc1 : std_logic := '0';
+  signal bin_c1        : unsigned(BIN_W-1 downto 0) := (others => '0');
+  signal cut_c1        : unsigned(PWR_W-1 downto 0) := (others => '0');
+  signal sum_c1        : unsigned(SUM_W-1 downto 0) := (others => '0');
+  signal plo_c1        : unsigned(LO_W+K_W-1 downto 0) := (others => '0');
+  signal phi_c1        : unsigned(HI_W+K_W-1 downto 0) := (others => '0');
+
+  -- stage c2: product registers
+  signal vc2, lc2, fc2 : std_logic := '0';
+  signal bin_c2        : unsigned(BIN_W-1 downto 0) := (others => '0');
+  signal cut_c2        : unsigned(PWR_W-1 downto 0) := (others => '0');
+  signal sum_c2        : unsigned(SUM_W-1 downto 0) := (others => '0');
+  signal plo_c2        : unsigned(LO_W+K_W-1 downto 0) := (others => '0');
+  signal phi_c2        : unsigned(HI_W+K_W-1 downto 0) := (others => '0');
+
+  -- stage c3: threshold
   signal vc, lc, fc : std_logic := '0';
   signal bin_c      : unsigned(BIN_W-1 downto 0) := (others => '0');
   signal thr_c      : unsigned(THR_W-1 downto 0) := (others => '0');
   signal cut_c      : unsigned(PWR_W-1 downto 0) := (others => '0');
   signal sum_c      : unsigned(SUM_W-1 downto 0) := (others => '0');
+
+  -- K_Q is a constant, so without this synthesis builds the multiplies from LUTs
+  attribute use_dsp : string;
+  attribute use_dsp of plo_c1 : signal is "yes";
+  attribute use_dsp of phi_c1 : signal is "yes";
 
   -- stage d (outputs)
   signal vd, ld, dd : std_logic := '0';
@@ -165,15 +196,39 @@ begin
       cut_b <= sr(HALF);
 
       ---------------------------------------------------------------------
-      -- stage c: threshold = K_Q * sum
+      -- stage c1: two partial products, K_Q * low half and K_Q * high half
       ---------------------------------------------------------------------
-      vc    <= vb;
-      lc    <= lb;
-      fc    <= fb;
-      bin_c <= bin_b;
-      thr_c <= sum_b * to_unsigned(K_Q, K_W);
-      cut_c <= cut_b;
-      sum_c <= sum_b;
+      vc1    <= vb;
+      lc1    <= lb;
+      fc1    <= fb;
+      bin_c1 <= bin_b;
+      cut_c1 <= cut_b;
+      sum_c1 <= sum_b;
+      plo_c1 <= sum_b(LO_W-1 downto 0) * to_unsigned(K_Q, K_W);
+      phi_c1 <= sum_b(SUM_W-1 downto LO_W) * to_unsigned(K_Q, K_W);
+
+      ---------------------------------------------------------------------
+      -- stage c2: product registers
+      ---------------------------------------------------------------------
+      vc2    <= vc1;
+      lc2    <= lc1;
+      fc2    <= fc1;
+      bin_c2 <= bin_c1;
+      cut_c2 <= cut_c1;
+      sum_c2 <= sum_c1;
+      plo_c2 <= plo_c1;
+      phi_c2 <= phi_c1;
+
+      ---------------------------------------------------------------------
+      -- stage c3: threshold = K_Q*lo + (K_Q*hi << 18) = K_Q * sum (exact)
+      ---------------------------------------------------------------------
+      vc    <= vc2;
+      lc    <= lc2;
+      fc    <= fc2;
+      bin_c <= bin_c2;
+      cut_c <= cut_c2;
+      sum_c <= sum_c2;
+      thr_c <= resize(plo_c2, THR_W) + shift_left(resize(phi_c2, THR_W), LO_W);
 
       ---------------------------------------------------------------------
       -- stage d: compare CUT * 2^16 > threshold
@@ -195,8 +250,8 @@ begin
         lag  <= (others => '0');
         n_in <= (others => '0');
         flush_cnt <= 0;
-        va <= '0'; vb <= '0'; vc <= '0'; vd <= '0';
-        la <= '0'; lb <= '0'; lc <= '0'; ld <= '0';
+        va <= '0'; vb <= '0'; vc1 <= '0'; vc2 <= '0'; vc <= '0'; vd <= '0';
+        la <= '0'; lb <= '0'; lc1 <= '0'; lc2 <= '0'; lc <= '0'; ld <= '0';
       end if;
     end if;
   end process;
