@@ -1,0 +1,25 @@
+name: sim
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install GHDL and Python packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl
+          pip install -r requirements.txt
+
+      - name: Run all testbenches
+        run: make test
+
+      - name: Check committed vectors match the model
+        run: git diff --exit-code vectors rtl/mf_coef_pkg.vhd
