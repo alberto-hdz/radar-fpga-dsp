@@ -5,3 +5,4 @@ syn/out/
 vectors/*_sim.txt
 sim_*.log
 syn/.Xil/
+syn/clockInfo.txt
